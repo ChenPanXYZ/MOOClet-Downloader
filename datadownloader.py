@@ -677,7 +677,7 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
 
 
         cursor.execute("""
-            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t1.name as reward_name, t0.reward_value, t2.name as context_name, t0.context_value, t0.context_time from contexts_merged_max t0 JOIN engine_variable t1 on (t0.reward_id = t1.id) JOIN engine_variable t2 on (t0.context_variable_id = t2.id) JOIN engine_policy t3 on (t0.policy_id = t3.id);
+            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t1.name as reward_name, t0.reward_value, t2.name as context_name, t0.context_value, t0.context_time from contexts_merged_max t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
         """)
 
         result = cursor.fetchall()
