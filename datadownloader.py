@@ -580,6 +580,18 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
     # GET DATA
     cursor = conn.cursor()
     try:
+        #TODO: Think about concurrency!
+        cursor.execute(
+            """
+            DROP VIEW IF EXISTS reward_values CASCADE;
+            DROP VIEW IF EXISTS context_values CASCADE;
+            DROP VIEW IF EXISTS arm_assignments CASCADE;
+            DROP VIEW IF EXISTS arm_reward_merged CASCADE;
+            DROP VIEW IF EXISTS arm_reward_merged_max CASCADE;
+            DROP VIEW IF EXISTS contexts_merged CASCADE;
+            DROP VIEW IF EXISTS contexts_merged_max CASCADE;
+            """
+        )
         print(f'MOOClet name: {mooclet_name}')
         print(f'Reward variable Name: {reward_variable_name}')
 
@@ -691,19 +703,20 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         # Flatten the column names
         pivot_df.columns = [f'{col[0]}_{col[1]}' for col in pivot_df.columns]
 
+        pivot_df.replace({np.nan: None}, inplace = True)
         # Reset the index
         pivot_df = pivot_df.drop(['context_value_nan','context_time_nan', 'assignment_id'], axis=1, errors='ignore')
         pivot_df = pivot_df.reset_index()
         pivot_df = pivot_df.rename(columns={'policy_name': 'policy', 'reward_value': 'reward'})
 
         cursor.close()
-        pivot_df.to_csv(f'./datasets/{mooclet_name}.csv', index=False)
+        return pivot_df
     except Exception as e:
         # empty
         print(e)
         cursor.close()
         df = pd.DataFrame()
-        df.to_csv(f'./datasets/{mooclet_name}.csv', index=False)
+        return df
 
 with open('list_of_mooclet_names.txt') as f:
     lines = f.readlines()
@@ -715,14 +728,5 @@ for mooclet_name in mooclet_names:
         reward_variable_name = find_reward_variable(mooclet_name)
     except:
         reward_variable_name = 'dummy reward name'
-    data_downloader_local_new(mooclet_name, reward_variable_name)
-
-# for mooclet_name in mooclet_names:
-#     reward_variable_name = None
-#     try:
-#         reward_variable_name = find_reward_variable(mooclet_name)
-#     except:
-#         reward_variable_name = 'dummy reward name'
-
-#     print(reward_variable_name)
-#     data_downloader_local(mooclet_name, reward_variable_name)
+    df = data_downloader_local_new(mooclet_name, reward_variable_name)
+    df.to_csv(f'./datasets/{mooclet_name}.csv', index=False)
