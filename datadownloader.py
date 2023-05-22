@@ -2,6 +2,17 @@ import pandas as pd
 import numpy as np
 from credentials import *  
 
+# contextual variable: time of day, 
+# 0: 9am-4pm
+# 1: 4pm - 9 pm
+# we assign arm at 9am
+# time of day: 0
+# user sends reward (replies to text) at 5pm
+# context is 0 because there's no context before 9AM
+# time of day: 1
+
+# Fix: when there is reward, use the reward time to match.
+# If there is no reward, use the arm assign time to match.
 
 def data_downloader_helper(mooclet_name, reward_variable_name):
     cursor = conn.cursor()
@@ -9,12 +20,6 @@ def data_downloader_helper(mooclet_name, reward_variable_name):
     mooclet_id = cursor.fetchone()[0]
     print("************************************************")
     cursor.execute("""
-        -- Prepare Tables before merging
-
-        -- TESTING variables
-        -- mooclet id: 2
-        -- reward id: 10
-
         -- Mooclets
         DROP TABLE IF EXISTS data_download_mooclet CASCADE;
 
@@ -568,16 +573,138 @@ def find_reward_variable(mooclet_name):
     return reward_variable_name
 
 
-# mooclet_names = [
-#     "Long Prompt Rationale Prototype 2",
-#     "Modular Timing Prototype 1",
-#     "Modular Timing Prototype 2",
-#     "Long Prompt Motivation Prototype 2",
-#     "Long prompt Reminder Prototype 2",
-#     "Long Prompt ReflectionCommit Prototype 2",
-#     "Modular Link MHA Prototype"
-# ]
 mooclet_names = []
+
+
+def data_downloader_local_new(mooclet_name, reward_variable_name):
+    # GET DATA
+    cursor = conn.cursor()
+    try:
+        print(f'MOOClet name: {mooclet_name}')
+        print(f'Reward variable Name: {reward_variable_name}')
+
+        reserved_variable_names = ['UR_or_TSCONTEXTUAL', 'coef_draw', 'precesion_draw', 'version', '']
+        cursor.execute("SELECT array_agg(distinct(id)) from engine_variable where name = ANY(%s);", [reserved_variable_names])
+        reserved_variable_ids = cursor.fetchall()[0][0]
+        # get mooclet id
+        cursor.execute("select id from engine_mooclet where name = %s;", [mooclet_name]);
+        mooclet_id = cursor.fetchone()[0]
+        print(f'MOOClet id: {mooclet_id}')
+        # get reward variable id
+        cursor.execute("select id from engine_variable where name = %s;", [reward_variable_name]);
+        reward_variable_id = cursor.fetchone()[0]
+        print(f'Reward variable id: {reward_variable_id}')
+
+        # get the variable id used for version (arm assignments)
+        cursor.execute("select id from engine_variable where name = 'version';");
+        version_id = cursor.fetchone()[0]
+        print(f'Version id: {version_id}')   
+
+        # get all reward values
+        cursor.execute("""
+            CREATE TEMPORARY VIEW reward_values AS
+            SELECT * FROM
+            engine_value WHERE variable_id = %s AND mooclet_id = %s;
+            """, [reward_variable_id, mooclet_id])
+        
+         # get all context values
+        cursor.execute("""
+            CREATE TEMPORARY VIEW context_values AS
+            SELECT * FROM
+            engine_value WHERE variable_id != %s AND mooclet_id = %s and version_id is null AND variable_id != ALL(%s);
+            """, [reward_variable_id, mooclet_id, reserved_variable_ids])
+
+        # Get all arm assignments (as a base)
+        cursor.execute("""
+            CREATE TEMPORARY VIEW arm_assignments AS
+            SELECT * FROM
+            engine_value WHERE variable_id = %s AND mooclet_id = %s;
+            """, [version_id, mooclet_id])
+        cursor.execute("select * from context_values")
+
+
+        # First, merge arm assignments with rewards after it.
+        cursor.execute("""
+            CREATE TEMPORARY VIEW arm_reward_merged AS
+            SELECT aa.id as assignment_id, aa.learner_id, aa.policy_id, aa.text AS arm, r.variable_id as reward_id, r.value as reward_value, r.timestamp as reward_time, aa.timestamp as arm_time
+            FROM arm_assignments aa LEFT JOIN reward_values r ON aa.learner_id = r.learner_id and aa.timestamp < r.timestamp;
+        """)
+        # Second, find largest rewards for each LEFT join pair.
+        cursor.execute("""
+            CREATE TEMPORARY VIEW arm_reward_merged_max AS
+            WITH arm_reward_merged_with_rank AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER(PARTITION BY assignment_id ORDER BY reward_time) AS row_number
+                FROM arm_reward_merged
+            )
+            SELECT
+                *, COALESCE(arm_reward_merged_with_rank.reward_time, arm_reward_merged_with_rank.arm_time) AS time_to_find_contexts
+                FROM arm_reward_merged_with_rank
+                WHERE row_number = 1;
+        """)
+        # Manually add a column called time_to_find_contexts to use to find contexts.
+
+        # Merge contexts with arm_reward_merged_max
+
+        # Now, it has column: ['assignment_id', 'learner_id', 'policy_id', 'arm', 'reward_id', 'reward_value', 'reward_time', 'arm_time', 'row_number', 'time_to_find_contexts']
+
+        # First, merge arm assignments with contexts before it.
+        cursor.execute("""
+            CREATE TEMPORARY VIEW contexts_merged AS
+            SELECT ar.assignment_id, ar.learner_id, ar.policy_id, ar.arm, ar.reward_id, ar.reward_value, ar.reward_time, ar.arm_time, ar.row_number, ar.time_to_find_contexts, c.value as context_value, c.variable_id as context_variable_id, c.timestamp as context_time
+            FROM arm_reward_merged_max ar LEFT JOIN context_values c ON ar.learner_id = c.learner_id and c.timestamp < ar.time_to_find_contexts;
+        """)
+
+        # cursor.execute("Select * FROM contexts_merged")
+        # colnames = [desc[0] for desc in cursor.description]
+        # print(colnames)
+
+        # Second, find largest contexts for each LEFT join pair.
+        cursor.execute("""
+            CREATE TEMPORARY VIEW contexts_merged_max AS
+            WITH arm_reward_contexts_merged_with_rank AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER(PARTITION BY (assignment_id, context_variable_id) ORDER BY context_variable_id) AS row_number2
+                FROM contexts_merged
+            )
+            SELECT
+                *
+                FROM arm_reward_contexts_merged_with_rank
+                WHERE row_number2 = 1;
+        """)
+
+
+        cursor.execute("""
+            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t1.name as reward_name, t0.reward_value, t2.name as context_name, t0.context_value, t0.context_time from contexts_merged_max t0 JOIN engine_variable t1 on (t0.reward_id = t1.id) JOIN engine_variable t2 on (t0.context_variable_id = t2.id) JOIN engine_policy t3 on (t0.policy_id = t3.id);
+        """)
+
+        result = cursor.fetchall()
+
+        df = pd.DataFrame(data = result, columns= [i[0] for i in cursor.description])
+
+        pivot_df = df.pivot(index=['assignment_id', 'learner_id', 'policy_name', 'arm', 'arm_time', 'reward_name', 'reward_value'],
+                            columns='context_name',
+                            values=['context_value', 'context_time'])
+
+        # Flatten the column names
+        pivot_df.columns = [f'{col[0]}_{col[1]}' for col in pivot_df.columns]
+
+        # Reset the index
+        pivot_df = pivot_df.reset_index()
+
+        # Print the resulting pivoted DataFrame
+
+        pivot_df.to_csv("temp.csv")
+
+        #print(arm_assignments)
+        cursor.close()
+        pivot_df.to_csv(f'./datasets/{mooclet_name}.csv', index=False, encoding='utf-8')
+    except Exception as e:
+        # empty
+        print(e)
+        cursor.close()
 
 with open('list_of_mooclet_names.txt') as f:
     lines = f.readlines()
@@ -589,6 +716,14 @@ for mooclet_name in mooclet_names:
         reward_variable_name = find_reward_variable(mooclet_name)
     except:
         reward_variable_name = 'dummy reward name'
+    data_downloader_local_new(mooclet_name, reward_variable_name)
 
-    print(reward_variable_name)
-    data_downloader_local(mooclet_name, reward_variable_name)
+# for mooclet_name in mooclet_names:
+#     reward_variable_name = None
+#     try:
+#         reward_variable_name = find_reward_variable(mooclet_name)
+#     except:
+#         reward_variable_name = 'dummy reward name'
+
+#     print(reward_variable_name)
+#     data_downloader_local(mooclet_name, reward_variable_name)
