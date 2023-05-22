@@ -13,6 +13,171 @@ from credentials import *
 
 # Fix: when there is reward, use the reward time to match.
 # If there is no reward, use the arm assign time to match.
+def find_reward_variable(mooclet_name):
+    cursor = conn.cursor()
+    print(mooclet_name)
+    cursor.execute("select id from engine_mooclet where name = %s;", [mooclet_name]);
+    mooclet_id = cursor.fetchone()[0]
+
+    cursor.execute("""
+    SELECT variable_id, count(*) from engine_value where mooclet_id = %s AND policy_id IS NOT null AND version_id IS NOT null AND variable_id != 3 group by variable_id order by count(*) desc;
+    """, [mooclet_id])
+
+    variable_id = cursor.fetchone()[0]
+    print(variable_id)
+    cursor.execute("""
+    SELECT name from engine_variable where id = %s;
+    """, [variable_id])
+    reward_variable_name = cursor.fetchone()[0]
+    
+    cursor.close()
+    return reward_variable_name
+
+
+mooclet_names = []
+
+
+def data_downloader_local_new(mooclet_name, reward_variable_name):
+    # GET DATA
+    cursor = conn.cursor()
+    try:
+        #TODO: Think about concurrency!
+        cursor.execute(
+            """
+            DROP VIEW IF EXISTS reward_values CASCADE;
+            DROP VIEW IF EXISTS context_values CASCADE;
+            DROP VIEW IF EXISTS arm_assignments CASCADE;
+            DROP VIEW IF EXISTS arm_reward_merged CASCADE;
+            DROP VIEW IF EXISTS arm_reward_merged_max CASCADE;
+            DROP VIEW IF EXISTS contexts_merged CASCADE;
+            DROP VIEW IF EXISTS contexts_merged_max CASCADE;
+            """
+        )
+        print(f'MOOClet name: {mooclet_name}')
+        print(f'Reward variable Name: {reward_variable_name}')
+
+        reserved_variable_names = ['UR_or_TSCONTEXTUAL', 'coef_draw', 'precesion_draw', 'version', '']
+        cursor.execute("SELECT array_agg(distinct(id)) from engine_variable where name = ANY(%s);", [reserved_variable_names])
+        reserved_variable_ids = cursor.fetchall()[0][0]
+        # get mooclet id
+        cursor.execute("select id from engine_mooclet where name = %s;", [mooclet_name]);
+        mooclet_id = cursor.fetchone()[0]
+        print(f'MOOClet id: {mooclet_id}')
+        # get reward variable id
+        cursor.execute("select id from engine_variable where name = %s;", [reward_variable_name]);
+        reward_variable_id = cursor.fetchone()[0]
+        print(f'Reward variable id: {reward_variable_id}')
+
+        # get the variable id used for version (arm assignments)
+        cursor.execute("select id from engine_variable where name = 'version';");
+        version_id = cursor.fetchone()[0]
+        print(f'Version id: {version_id}')   
+
+        # get all reward values
+        cursor.execute("""
+            CREATE TEMPORARY VIEW reward_values AS
+            SELECT * FROM
+            engine_value WHERE variable_id = %s AND mooclet_id = %s;
+            """, [reward_variable_id, mooclet_id])
+        
+         # get all context values
+        cursor.execute("""
+            CREATE TEMPORARY VIEW context_values AS
+            SELECT * FROM
+            engine_value WHERE variable_id != %s AND mooclet_id = %s and version_id is null AND variable_id != ALL(%s);
+            """, [reward_variable_id, mooclet_id, reserved_variable_ids])
+
+        # Get all arm assignments (as a base)
+        cursor.execute("""
+            CREATE TEMPORARY VIEW arm_assignments AS
+            SELECT * FROM
+            engine_value WHERE variable_id = %s AND mooclet_id = %s;
+            """, [version_id, mooclet_id])
+        cursor.execute("select * from context_values")
+
+
+        # First, merge arm assignments with rewards after it.
+        cursor.execute("""
+            CREATE TEMPORARY VIEW arm_reward_merged AS
+            SELECT aa.id as assignment_id, aa.learner_id, aa.policy_id, aa.text AS arm, r.variable_id as reward_id, r.value as reward_value, r.timestamp as reward_time, aa.timestamp as arm_time
+            FROM arm_assignments aa LEFT JOIN reward_values r ON aa.learner_id = r.learner_id and aa.timestamp < r.timestamp;
+        """)
+        # Second, find largest rewards for each LEFT join pair.
+        cursor.execute("""
+            CREATE TEMPORARY VIEW arm_reward_merged_max AS
+            WITH arm_reward_merged_with_rank AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER(PARTITION BY assignment_id ORDER BY reward_time) AS row_number
+                FROM arm_reward_merged
+            )
+            SELECT
+                *, COALESCE(arm_reward_merged_with_rank.reward_time, arm_reward_merged_with_rank.arm_time) AS time_to_find_contexts
+                FROM arm_reward_merged_with_rank
+                WHERE row_number = 1;
+        """)
+        # Manually add a column called time_to_find_contexts to use to find contexts.
+
+        # Merge contexts with arm_reward_merged_max
+
+        # Now, it has column: ['assignment_id', 'learner_id', 'policy_id', 'arm', 'reward_id', 'reward_value', 'reward_time', 'arm_time', 'row_number', 'time_to_find_contexts']
+
+        # First, merge arm assignments with contexts before it.
+        cursor.execute("""
+            CREATE TEMPORARY VIEW contexts_merged AS
+            SELECT ar.assignment_id, ar.learner_id, ar.policy_id, ar.arm, ar.reward_id, ar.reward_value, ar.reward_time, ar.arm_time, ar.row_number, ar.time_to_find_contexts, c.value as context_value, c.variable_id as context_variable_id, c.timestamp as context_time
+            FROM arm_reward_merged_max ar LEFT JOIN context_values c ON ar.learner_id = c.learner_id and c.timestamp < ar.time_to_find_contexts;
+        """)
+
+        # cursor.execute("Select * FROM contexts_merged")
+        # colnames = [desc[0] for desc in cursor.description]
+        # print(colnames)
+
+        # Second, find largest contexts for each LEFT join pair.
+        cursor.execute("""
+            CREATE TEMPORARY VIEW contexts_merged_max AS
+            WITH arm_reward_contexts_merged_with_rank AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER(PARTITION BY (assignment_id, context_variable_id) ORDER BY context_variable_id) AS row_number2
+                FROM contexts_merged
+            )
+            SELECT
+                *
+                FROM arm_reward_contexts_merged_with_rank
+                WHERE row_number2 = 1;
+        """)
+
+
+        cursor.execute("""
+            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t1.name as reward_name, t0.reward_value, t2.name as context_name, t0.context_value, t0.context_time from contexts_merged_max t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
+        """)
+
+        result = cursor.fetchall()
+
+        df = pd.DataFrame(data = result, columns= [i[0] for i in cursor.description])
+
+        pivot_df = df.pivot(index=['assignment_id', 'learner_id', 'policy_name', 'arm', 'arm_time', 'reward_name', 'reward_value'],
+                            columns='context_name',
+                            values=['context_value', 'context_time'])
+
+        # Flatten the column names
+        pivot_df.columns = [f'{col[0]}_{col[1]}' for col in pivot_df.columns]
+
+        pivot_df.replace({np.nan: None}, inplace = True)
+        # Reset the index
+        pivot_df = pivot_df.drop(['context_value_nan','context_time_nan', 'assignment_id'], axis=1, errors='ignore')
+        pivot_df = pivot_df.reset_index()
+        pivot_df = pivot_df.rename(columns={'policy_name': 'policy', 'reward_value': 'reward'})
+
+        cursor.close()
+        return pivot_df
+    except Exception as e:
+        # empty
+        print(e)
+        cursor.close()
+        df = pd.DataFrame()
+        return df
 
 def data_downloader_helper(mooclet_name, reward_variable_name):
     cursor = conn.cursor()
@@ -538,185 +703,6 @@ def data_downloader_helper(mooclet_name, reward_variable_name):
     return df
 
 
-
-def data_downloader_local(mooclet_name, reward_variable_name):
-    # GET DATA
-    try:
-        df = data_downloader_helper(mooclet_name, reward_variable_name)
-        print(len(df))
-        df.to_csv(f'./datasets/{mooclet_name}.csv', index=False, encoding='utf-8')
-    except Exception as e:
-        # empty
-        print(e)
-        df = pd.DataFrame()
-        df.to_csv(f'./datasets/{mooclet_name}.csv', index=False)
-# Find Reward Variable by giving a mooclet name
-# By checking reward values that appear most.
-def find_reward_variable(mooclet_name):
-    cursor = conn.cursor()
-    print(mooclet_name)
-    cursor.execute("select id from engine_mooclet where name = %s;", [mooclet_name]);
-    mooclet_id = cursor.fetchone()[0]
-
-    cursor.execute("""
-    SELECT variable_id, count(*) from engine_value where mooclet_id = %s AND policy_id IS NOT null AND version_id IS NOT null AND variable_id != 3 group by variable_id order by count(*) desc;
-    """, [mooclet_id])
-
-    variable_id = cursor.fetchone()[0]
-    print(variable_id)
-    cursor.execute("""
-    SELECT name from engine_variable where id = %s;
-    """, [variable_id])
-    reward_variable_name = cursor.fetchone()[0]
-    
-    cursor.close()
-    return reward_variable_name
-
-
-mooclet_names = []
-
-
-def data_downloader_local_new(mooclet_name, reward_variable_name):
-    # GET DATA
-    cursor = conn.cursor()
-    try:
-        #TODO: Think about concurrency!
-        cursor.execute(
-            """
-            DROP VIEW IF EXISTS reward_values CASCADE;
-            DROP VIEW IF EXISTS context_values CASCADE;
-            DROP VIEW IF EXISTS arm_assignments CASCADE;
-            DROP VIEW IF EXISTS arm_reward_merged CASCADE;
-            DROP VIEW IF EXISTS arm_reward_merged_max CASCADE;
-            DROP VIEW IF EXISTS contexts_merged CASCADE;
-            DROP VIEW IF EXISTS contexts_merged_max CASCADE;
-            """
-        )
-        print(f'MOOClet name: {mooclet_name}')
-        print(f'Reward variable Name: {reward_variable_name}')
-
-        reserved_variable_names = ['UR_or_TSCONTEXTUAL', 'coef_draw', 'precesion_draw', 'version', '']
-        cursor.execute("SELECT array_agg(distinct(id)) from engine_variable where name = ANY(%s);", [reserved_variable_names])
-        reserved_variable_ids = cursor.fetchall()[0][0]
-        # get mooclet id
-        cursor.execute("select id from engine_mooclet where name = %s;", [mooclet_name]);
-        mooclet_id = cursor.fetchone()[0]
-        print(f'MOOClet id: {mooclet_id}')
-        # get reward variable id
-        cursor.execute("select id from engine_variable where name = %s;", [reward_variable_name]);
-        reward_variable_id = cursor.fetchone()[0]
-        print(f'Reward variable id: {reward_variable_id}')
-
-        # get the variable id used for version (arm assignments)
-        cursor.execute("select id from engine_variable where name = 'version';");
-        version_id = cursor.fetchone()[0]
-        print(f'Version id: {version_id}')   
-
-        # get all reward values
-        cursor.execute("""
-            CREATE TEMPORARY VIEW reward_values AS
-            SELECT * FROM
-            engine_value WHERE variable_id = %s AND mooclet_id = %s;
-            """, [reward_variable_id, mooclet_id])
-        
-         # get all context values
-        cursor.execute("""
-            CREATE TEMPORARY VIEW context_values AS
-            SELECT * FROM
-            engine_value WHERE variable_id != %s AND mooclet_id = %s and version_id is null AND variable_id != ALL(%s);
-            """, [reward_variable_id, mooclet_id, reserved_variable_ids])
-
-        # Get all arm assignments (as a base)
-        cursor.execute("""
-            CREATE TEMPORARY VIEW arm_assignments AS
-            SELECT * FROM
-            engine_value WHERE variable_id = %s AND mooclet_id = %s;
-            """, [version_id, mooclet_id])
-        cursor.execute("select * from context_values")
-
-
-        # First, merge arm assignments with rewards after it.
-        cursor.execute("""
-            CREATE TEMPORARY VIEW arm_reward_merged AS
-            SELECT aa.id as assignment_id, aa.learner_id, aa.policy_id, aa.text AS arm, r.variable_id as reward_id, r.value as reward_value, r.timestamp as reward_time, aa.timestamp as arm_time
-            FROM arm_assignments aa LEFT JOIN reward_values r ON aa.learner_id = r.learner_id and aa.timestamp < r.timestamp;
-        """)
-        # Second, find largest rewards for each LEFT join pair.
-        cursor.execute("""
-            CREATE TEMPORARY VIEW arm_reward_merged_max AS
-            WITH arm_reward_merged_with_rank AS (
-            SELECT
-                *,
-                ROW_NUMBER() OVER(PARTITION BY assignment_id ORDER BY reward_time) AS row_number
-                FROM arm_reward_merged
-            )
-            SELECT
-                *, COALESCE(arm_reward_merged_with_rank.reward_time, arm_reward_merged_with_rank.arm_time) AS time_to_find_contexts
-                FROM arm_reward_merged_with_rank
-                WHERE row_number = 1;
-        """)
-        # Manually add a column called time_to_find_contexts to use to find contexts.
-
-        # Merge contexts with arm_reward_merged_max
-
-        # Now, it has column: ['assignment_id', 'learner_id', 'policy_id', 'arm', 'reward_id', 'reward_value', 'reward_time', 'arm_time', 'row_number', 'time_to_find_contexts']
-
-        # First, merge arm assignments with contexts before it.
-        cursor.execute("""
-            CREATE TEMPORARY VIEW contexts_merged AS
-            SELECT ar.assignment_id, ar.learner_id, ar.policy_id, ar.arm, ar.reward_id, ar.reward_value, ar.reward_time, ar.arm_time, ar.row_number, ar.time_to_find_contexts, c.value as context_value, c.variable_id as context_variable_id, c.timestamp as context_time
-            FROM arm_reward_merged_max ar LEFT JOIN context_values c ON ar.learner_id = c.learner_id and c.timestamp < ar.time_to_find_contexts;
-        """)
-
-        # cursor.execute("Select * FROM contexts_merged")
-        # colnames = [desc[0] for desc in cursor.description]
-        # print(colnames)
-
-        # Second, find largest contexts for each LEFT join pair.
-        cursor.execute("""
-            CREATE TEMPORARY VIEW contexts_merged_max AS
-            WITH arm_reward_contexts_merged_with_rank AS (
-            SELECT
-                *,
-                ROW_NUMBER() OVER(PARTITION BY (assignment_id, context_variable_id) ORDER BY context_variable_id) AS row_number2
-                FROM contexts_merged
-            )
-            SELECT
-                *
-                FROM arm_reward_contexts_merged_with_rank
-                WHERE row_number2 = 1;
-        """)
-
-
-        cursor.execute("""
-            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t1.name as reward_name, t0.reward_value, t2.name as context_name, t0.context_value, t0.context_time from contexts_merged_max t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
-        """)
-
-        result = cursor.fetchall()
-
-        df = pd.DataFrame(data = result, columns= [i[0] for i in cursor.description])
-
-        pivot_df = df.pivot(index=['assignment_id', 'learner_id', 'policy_name', 'arm', 'arm_time', 'reward_name', 'reward_value'],
-                            columns='context_name',
-                            values=['context_value', 'context_time'])
-
-        # Flatten the column names
-        pivot_df.columns = [f'{col[0]}_{col[1]}' for col in pivot_df.columns]
-
-        pivot_df.replace({np.nan: None}, inplace = True)
-        # Reset the index
-        pivot_df = pivot_df.drop(['context_value_nan','context_time_nan', 'assignment_id'], axis=1, errors='ignore')
-        pivot_df = pivot_df.reset_index()
-        pivot_df = pivot_df.rename(columns={'policy_name': 'policy', 'reward_value': 'reward'})
-
-        cursor.close()
-        return pivot_df
-    except Exception as e:
-        # empty
-        print(e)
-        cursor.close()
-        df = pd.DataFrame()
-        return df
 
 with open('list_of_mooclet_names.txt') as f:
     lines = f.readlines()
