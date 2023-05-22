@@ -589,4 +589,6 @@ for mooclet_name in mooclet_names:
         reward_variable_name = find_reward_variable(mooclet_name)
     except:
         reward_variable_name = 'dummy reward name'
+
+    print(reward_variable_name)
     data_downloader_local(mooclet_name, reward_variable_name)
