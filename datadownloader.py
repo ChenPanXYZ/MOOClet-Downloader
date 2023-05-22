@@ -485,9 +485,11 @@ def data_downloader_helper(mooclet_name, reward_variable_name):
 
     result = []
     available_contextual_names = []
+    reserved_variable_names = ['UR_or_TSCONTEXTUAL', 'coef_draw', 'precesion_draw', '']
+
     for i, row in df.iterrows():
         for context in row['contexts']:
-            if context['name'] not in available_contextual_names and context['name'] != None:
+            if context['name'] not in available_contextual_names and context['name'] != None and context['name'] not in reserved_variable_names:
                 available_contextual_names.append(context['name'])
 
     for i, row in df.iterrows():
@@ -535,10 +537,12 @@ def data_downloader_helper(mooclet_name, reward_variable_name):
 def data_downloader_local(mooclet_name, reward_variable_name):
     # GET DATA
     try:
-        df = data_downloader_helper(mooclet_name, reward_variable_name)   
+        df = data_downloader_helper(mooclet_name, reward_variable_name)
+        print(len(df))
         df.to_csv(f'./datasets/{mooclet_name}.csv', index=False, encoding='utf-8')
-    except:
+    except Exception as e:
         # empty
+        print(e)
         df = pd.DataFrame()
         df.to_csv(f'./datasets/{mooclet_name}.csv', index=False)
 # Find Reward Variable by giving a mooclet name
