@@ -692,19 +692,18 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         pivot_df.columns = [f'{col[0]}_{col[1]}' for col in pivot_df.columns]
 
         # Reset the index
+        pivot_df = pivot_df.drop(['context_value_nan','context_time_nan', 'assignment_id'], axis=1, errors='ignore')
         pivot_df = pivot_df.reset_index()
+        pivot_df = pivot_df.rename(columns={'policy_name': 'policy', 'reward_value': 'reward'})
 
-        # Print the resulting pivoted DataFrame
-
-        pivot_df.to_csv("temp.csv")
-
-        #print(arm_assignments)
         cursor.close()
-        pivot_df.to_csv(f'./datasets/{mooclet_name}.csv', index=False, encoding='utf-8')
+        pivot_df.to_csv(f'./datasets/{mooclet_name}.csv', index=False)
     except Exception as e:
         # empty
         print(e)
         cursor.close()
+        df = pd.DataFrame()
+        df.to_csv(f'./datasets/{mooclet_name}.csv', index=False)
 
 with open('list_of_mooclet_names.txt') as f:
     lines = f.readlines()
