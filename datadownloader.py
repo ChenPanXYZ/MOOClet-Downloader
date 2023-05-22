@@ -1,15 +1,10 @@
 import pandas as pd
 import numpy as np
 from credentials import *  
+import uuid
+from psycopg2.extensions import AsIs
 
-# contextual variable: time of day, 
-# 0: 9am-4pm
-# 1: 4pm - 9 pm
-# we assign arm at 9am
-# time of day: 0
-# user sends reward (replies to text) at 5pm
-# context is 0 because there's no context before 9AM
-# time of day: 1
+
 
 # Fix: when there is reward, use the reward time to match.
 # If there is no reward, use the arm assign time to match.
@@ -40,25 +35,24 @@ mooclet_names = []
 def data_downloader_local_new(mooclet_name, reward_variable_name):
     # GET DATA
     cursor = conn.cursor()
+    unique_id = str(uuid.uuid4()).replace("-", "_")
+    #TODO: Think about concurrency! Use unique id for now.
+    reward_values_view = AsIs(f'reward_values_{unique_id}')
+    context_values_view = AsIs(f'context_values_{unique_id}')
+    arm_assignments_view = AsIs(f'arm_assignments_{unique_id}')
+    arm_reward_merged_view = AsIs(f'arm_reward_merged_{unique_id}')
+    arm_reward_merged_max_view = AsIs(f'arm_reward_merged_max_{unique_id}')
+    contexts_merged_view = AsIs(f'contexts_merged_{unique_id}')
+    contexts_merged_max_view = AsIs(f'contexts_merged_max_{unique_id}')
     try:
-        #TODO: Think about concurrency!
-        cursor.execute(
-            """
-            DROP VIEW IF EXISTS reward_values CASCADE;
-            DROP VIEW IF EXISTS context_values CASCADE;
-            DROP VIEW IF EXISTS arm_assignments CASCADE;
-            DROP VIEW IF EXISTS arm_reward_merged CASCADE;
-            DROP VIEW IF EXISTS arm_reward_merged_max CASCADE;
-            DROP VIEW IF EXISTS contexts_merged CASCADE;
-            DROP VIEW IF EXISTS contexts_merged_max CASCADE;
-            """
-        )
         print(f'MOOClet name: {mooclet_name}')
         print(f'Reward variable Name: {reward_variable_name}')
 
+        #Reserved variables are variables that are not reward or contextual variables. We don't want them in the dataset.
         reserved_variable_names = ['UR_or_TSCONTEXTUAL', 'coef_draw', 'precesion_draw', 'version', '']
         cursor.execute("SELECT array_agg(distinct(id)) from engine_variable where name = ANY(%s);", [reserved_variable_names])
         reserved_variable_ids = cursor.fetchall()[0][0]
+
         # get mooclet id
         cursor.execute("select id from engine_mooclet where name = %s;", [mooclet_name]);
         mooclet_id = cursor.fetchone()[0]
@@ -73,90 +67,89 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         version_id = cursor.fetchone()[0]
         print(f'Version id: {version_id}')   
 
+
+
         # get all reward values
         cursor.execute("""
-            CREATE TEMPORARY VIEW reward_values AS
+            CREATE TEMPORARY VIEW %s AS
             SELECT * FROM
             engine_value WHERE variable_id = %s AND mooclet_id = %s;
-            """, [reward_variable_id, mooclet_id])
+            """, [reward_values_view, reward_variable_id, mooclet_id])
         
          # get all context values
         cursor.execute("""
-            CREATE TEMPORARY VIEW context_values AS
+            CREATE TEMPORARY VIEW %s AS
             SELECT * FROM
             engine_value WHERE variable_id != %s AND mooclet_id = %s and version_id is null AND variable_id != ALL(%s);
-            """, [reward_variable_id, mooclet_id, reserved_variable_ids])
+            """, [context_values_view, reward_variable_id, mooclet_id, reserved_variable_ids])
 
-        # Get all arm assignments (as a base)
+        # Get all arm assignments (as a base to which we are appending reward & contextual based on some condition)
         cursor.execute("""
-            CREATE TEMPORARY VIEW arm_assignments AS
+            CREATE TEMPORARY VIEW %s AS
             SELECT * FROM
             engine_value WHERE variable_id = %s AND mooclet_id = %s;
-            """, [version_id, mooclet_id])
-        cursor.execute("select * from context_values")
-
+            """, [arm_assignments_view, version_id, mooclet_id])
 
         # First, merge arm assignments with rewards after it.
         cursor.execute("""
-            CREATE TEMPORARY VIEW arm_reward_merged AS
+            CREATE TEMPORARY VIEW %s AS
             SELECT aa.id as assignment_id, aa.learner_id, aa.policy_id, aa.text AS arm, r.variable_id as reward_id, r.value as reward_value, r.timestamp as reward_time, aa.timestamp as arm_time
-            FROM arm_assignments aa LEFT JOIN reward_values r ON aa.learner_id = r.learner_id and aa.timestamp < r.timestamp;
-        """)
+            FROM %s aa LEFT JOIN %s r ON aa.learner_id = r.learner_id and aa.timestamp < r.timestamp;
+        """, [arm_reward_merged_view, arm_assignments_view, reward_values_view])
         # Second, find largest rewards for each LEFT join pair.
         cursor.execute("""
-            CREATE TEMPORARY VIEW arm_reward_merged_max AS
+            CREATE TEMPORARY VIEW %s AS
             WITH arm_reward_merged_with_rank AS (
             SELECT
                 *,
                 ROW_NUMBER() OVER(PARTITION BY assignment_id ORDER BY reward_time) AS row_number
-                FROM arm_reward_merged
+                FROM %s
             )
             SELECT
                 *, COALESCE(arm_reward_merged_with_rank.reward_time, arm_reward_merged_with_rank.arm_time) AS time_to_find_contexts
                 FROM arm_reward_merged_with_rank
                 WHERE row_number = 1;
-        """)
+        """, [arm_reward_merged_max_view, arm_reward_merged_view])
         # Manually add a column called time_to_find_contexts to use to find contexts.
 
+
+
         # Merge contexts with arm_reward_merged_max
-
         # Now, it has column: ['assignment_id', 'learner_id', 'policy_id', 'arm', 'reward_id', 'reward_value', 'reward_time', 'arm_time', 'row_number', 'time_to_find_contexts']
-
         # First, merge arm assignments with contexts before it.
         cursor.execute("""
-            CREATE TEMPORARY VIEW contexts_merged AS
+            CREATE TEMPORARY VIEW %s AS
             SELECT ar.assignment_id, ar.learner_id, ar.policy_id, ar.arm, ar.reward_id, ar.reward_value, ar.reward_time, ar.arm_time, ar.row_number, ar.time_to_find_contexts, c.value as context_value, c.variable_id as context_variable_id, c.timestamp as context_time
-            FROM arm_reward_merged_max ar LEFT JOIN context_values c ON ar.learner_id = c.learner_id and c.timestamp < ar.time_to_find_contexts;
-        """)
-
-        # cursor.execute("Select * FROM contexts_merged")
-        # colnames = [desc[0] for desc in cursor.description]
-        # print(colnames)
+            FROM %s ar LEFT JOIN %s c ON ar.learner_id = c.learner_id and c.timestamp < ar.time_to_find_contexts;
+        """, [contexts_merged_view, arm_reward_merged_max_view, context_values_view])
 
         # Second, find largest contexts for each LEFT join pair.
         cursor.execute("""
-            CREATE TEMPORARY VIEW contexts_merged_max AS
+            CREATE TEMPORARY VIEW %s AS
             WITH arm_reward_contexts_merged_with_rank AS (
             SELECT
                 *,
                 ROW_NUMBER() OVER(PARTITION BY (assignment_id, context_variable_id) ORDER BY context_variable_id) AS row_number2
-                FROM contexts_merged
+                FROM %s
             )
             SELECT
                 *
                 FROM arm_reward_contexts_merged_with_rank
                 WHERE row_number2 = 1;
-        """)
+        """, [contexts_merged_max_view, contexts_merged_view])
 
 
+
+        # Now we have everything, but we still need to map IDs with Names.
         cursor.execute("""
-            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t1.name as reward_name, t0.reward_value, t2.name as context_name, t0.context_value, t0.context_time from contexts_merged_max t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
-        """)
+            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t1.name as reward_name, t0.reward_value, t2.name as context_name, t0.context_value, t0.context_time from %s t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
+        """, [contexts_merged_max_view])
 
         result = cursor.fetchall()
 
-        df = pd.DataFrame(data = result, columns= [i[0] for i in cursor.description])
 
+        #TODO: Do Pivot in SQL!
+        df = pd.DataFrame(data = result, columns= [i[0] for i in cursor.description])
         pivot_df = df.pivot(index=['assignment_id', 'learner_id', 'policy_name', 'arm', 'arm_time', 'reward_name', 'reward_value'],
                             columns='context_name',
                             values=['context_value', 'context_time'])
@@ -170,11 +163,33 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         pivot_df = pivot_df.reset_index()
         pivot_df = pivot_df.rename(columns={'policy_name': 'policy', 'reward_value': 'reward'})
 
+        cursor.execute(
+            """
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            """, [reward_values_view, context_values_view, arm_assignments_view, arm_reward_merged_view, arm_reward_merged_max_view, contexts_merged_view, contexts_merged_max_view]
+        )
         cursor.close()
         return pivot_df
     except Exception as e:
         # empty
         print(e)
+        cursor.execute(
+            """
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            DROP VIEW IF EXISTS %s CASCADE;
+            """, [reward_values_view, context_values_view, arm_assignments_view, arm_reward_merged_view, arm_reward_merged_max_view, contexts_merged_view, contexts_merged_max_view]
+        )
         cursor.close()
         df = pd.DataFrame()
         return df
