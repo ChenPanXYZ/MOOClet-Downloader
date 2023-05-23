@@ -93,7 +93,7 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         # First, merge arm assignments with rewards after it.
         cursor.execute("""
             CREATE TEMPORARY VIEW %s AS
-            SELECT aa.id as assignment_id, aa.learner_id, aa.policy_id, aa.text AS arm, r.variable_id as reward_id, r.value as reward_value, r.timestamp as reward_time, aa.timestamp as arm_time
+            SELECT aa.id as assignment_id, aa.learner_id, aa.policy_id, aa.text AS arm, r.variable_id as reward_id, r.value as reward_value, r.timestamp as reward_time, aa.timestamp as arm_time, r.id as reward_value_id
             FROM %s aa LEFT JOIN %s r ON aa.learner_id = r.learner_id and aa.timestamp < r.timestamp;
         """, [arm_reward_merged_view, arm_assignments_view, reward_values_view])
         # Second, find largest rewards for each LEFT join pair.
@@ -117,13 +117,29 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         # Merge contexts with arm_reward_merged_max
         # Now, it has column: ['assignment_id', 'learner_id', 'policy_id', 'arm', 'reward_id', 'reward_value', 'reward_time', 'arm_time', 'row_number', 'time_to_find_contexts']
         # First, merge arm assignments with contexts before it.
+
+        # cursor.execute(
+        #     """
+        #     CREATE TEMPORARY VIEW arm_reward_merged_max_time_and_next_time AS
+        #     SELECT t1.assignment_id, t1.time_to_find_contexts, (
+        #         SELECT coalesce(MAX(t2.time_to_find_contexts), '1998-09-06')
+        #         FROM %s t2
+        #         WHERE t2.learner_id = t1.learner_id AND t2.time_to_find_contexts < t1.time_to_find_contexts group by learner_id
+        #     ) AS previous_time_to_find_contexts
+        #     FROM %s t1;
+        #     """, [arm_reward_merged_max_view, arm_reward_merged_max_view]
+        # )
+
         cursor.execute("""
             CREATE TEMPORARY VIEW %s AS
-            SELECT ar.assignment_id, ar.learner_id, ar.policy_id, ar.arm, ar.reward_id, ar.reward_value, ar.reward_time, ar.arm_time, ar.row_number, ar.time_to_find_contexts, c.value as context_value, c.variable_id as context_variable_id, c.timestamp as context_time
+            SELECT ar.assignment_id, ar.learner_id, ar.policy_id, ar.arm, ar.reward_value_id, ar.reward_id, ar.reward_value, ar.reward_time, ar.arm_time, ar.row_number, ar.time_to_find_contexts, c.id as context_value_id, c.value as context_value, c.variable_id as context_variable_id, c.timestamp as context_time, c.text as context_text
             FROM %s ar LEFT JOIN %s c ON ar.learner_id = c.learner_id and c.timestamp < ar.time_to_find_contexts;
         """, [contexts_merged_view, arm_reward_merged_max_view, context_values_view])
 
+        #TODO: check if above makes sense, because now we may use reward time or assignment time.
+
         # Second, find largest contexts for each LEFT join pair.
+        
         cursor.execute("""
             CREATE TEMPORARY VIEW %s AS
             WITH arm_reward_contexts_merged_with_rank AS (
@@ -142,26 +158,31 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
 
         # Now we have everything, but we still need to map IDs with Names.
         cursor.execute("""
-            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t1.name as reward_name, t0.reward_value, t2.name as context_name, t0.context_value, t0.context_time from %s t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
+            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t0.reward_value_id, t1.name as reward_name, t0.reward_value, t0.context_value_id, t2.name as context_name, t0.context_value, t0.context_time, t0.context_text from %s t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
         """, [contexts_merged_max_view])
 
         result = cursor.fetchall()
 
 
-        #TODO: Do Pivot in SQL!
+
+        # TODO: Do Pivot in SQL!
+        
         df = pd.DataFrame(data = result, columns= [i[0] for i in cursor.description])
-        pivot_df = df.pivot(index=['assignment_id', 'learner_id', 'policy_name', 'arm', 'arm_time', 'reward_name', 'reward_value'],
+        pivot_df = df.pivot(index=['assignment_id', 'learner_id', 'policy_name', 'arm', 'arm_time', 'reward_value_id', 'reward_name', 'reward_value'],
                             columns='context_name',
-                            values=['context_value', 'context_time'])
+                            values=['context_value_id', 'context_value', 'context_time', 'context_text'])
+        
 
         # Flatten the column names
         pivot_df.columns = [f'{col[0]}_{col[1]}' for col in pivot_df.columns]
 
         pivot_df.replace({np.nan: None}, inplace = True)
         # Reset the index
-        pivot_df = pivot_df.drop(['context_value_nan','context_time_nan', 'assignment_id'], axis=1, errors='ignore')
+        pivot_df = pivot_df.drop(['reward_value_id_nan', 'context_value_id_nan', 'context_value_nan','context_time_nan', 'assignment_id'], axis=1, errors='ignore')
         pivot_df = pivot_df.reset_index()
         pivot_df = pivot_df.rename(columns={'policy_name': 'policy', 'reward_value': 'reward'})
+
+        df = pivot_df
 
         cursor.execute(
             """
@@ -175,7 +196,7 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
             """, [reward_values_view, context_values_view, arm_assignments_view, arm_reward_merged_view, arm_reward_merged_max_view, contexts_merged_view, contexts_merged_max_view]
         )
         cursor.close()
-        return pivot_df
+        return df
     except Exception as e:
         # empty
         print(e)
