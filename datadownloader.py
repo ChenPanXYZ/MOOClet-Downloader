@@ -89,14 +89,14 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
             SELECT * FROM
             engine_value WHERE variable_id = %s AND mooclet_id = %s;
             """, [arm_assignments_view, version_id, mooclet_id])
-
+        
         # First, merge arm assignments with rewards after it.
         cursor.execute("""
             CREATE TEMPORARY VIEW %s AS
             SELECT aa.id as assignment_id, aa.learner_id, aa.policy_id, aa.text AS arm, r.variable_id as reward_id, r.value as reward_value, r.timestamp as reward_time, aa.timestamp as arm_time, r.id as reward_value_id
             FROM %s aa LEFT JOIN %s r ON aa.learner_id = r.learner_id and aa.timestamp < r.timestamp;
         """, [arm_reward_merged_view, arm_assignments_view, reward_values_view])
-        # Second, find largest rewards for each LEFT join pair.
+        # Second, find earliest rewards for each LEFT join pair.
         cursor.execute("""
             CREATE TEMPORARY VIEW %s AS
             WITH arm_reward_merged_with_rank AS (
