@@ -158,7 +158,7 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
 
         # Now we have everything, but we still need to map IDs with Names.
         cursor.execute("""
-            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t0.reward_value_id, t1.name as reward_name, t0.reward_value, t0.context_value_id, t2.name as context_name, t0.context_value, t0.context_time, t0.context_text from %s t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
+            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t0.reward_value_id, t1.name as reward_name, t0.reward_value, t0.reward_time, t0.context_value_id, t2.name as context_name, t0.context_value, t0.context_time, t0.context_text from %s t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
         """, [contexts_merged_max_view])
 
         result = cursor.fetchall()
@@ -168,7 +168,7 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         # TODO: Do Pivot in SQL!
         
         df = pd.DataFrame(data = result, columns= [i[0] for i in cursor.description])
-        pivot_df = df.pivot(index=['assignment_id', 'learner_id', 'policy_name', 'arm', 'arm_time', 'reward_value_id', 'reward_name', 'reward_value'],
+        pivot_df = df.pivot(index=['assignment_id', 'learner_id', 'policy_name', 'arm', 'arm_time', 'reward_value_id', 'reward_name', 'reward_value', 'reward_time'],
                             columns='context_name',
                             values=['context_value_id', 'context_value', 'context_time', 'context_text'])
         
@@ -184,6 +184,10 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
 
         df = pivot_df
 
+        mask = df['reward_value_id'].duplicated(keep='last')
+
+        # Set reward_name, reward, and reward_time to None for non-last occurrences
+        df.loc[mask, ['reward_name', 'reward', 'reward_time']] = np.nan
         cursor.execute(
             """
             DROP VIEW IF EXISTS %s CASCADE;
