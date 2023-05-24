@@ -168,8 +168,15 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         # TODO: Do Pivot in SQL!
         
         df = pd.DataFrame(data = result, columns= [i[0] for i in cursor.description])
+        contextual_values = df['context_name'].dropna().unique()
+        right_order = []
+        for contextual_value in contextual_values:
+            right_order.append(f'context_value_id_{contextual_value}')
+            right_order.append(f'context_value_{contextual_value}')
+            right_order.append(f'context_time_{contextual_value}')
+            right_order.append(f'context_text_{contextual_value}')
         pivot_df = df.pivot(index=['assignment_id', 'learner_id', 'policy_name', 'arm', 'arm_time', 'reward_value_id', 'reward_name', 'reward_value', 'reward_time'],
-                            columns='context_name',
+                            columns=['context_name'],
                             values=['context_value_id', 'context_value', 'context_time', 'context_text'])
         
 
@@ -178,7 +185,9 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
 
         pivot_df.replace({np.nan: None}, inplace = True)
         # Reset the index
-        pivot_df = pivot_df.drop(['reward_value_id_nan', 'context_value_id_nan', 'context_value_nan','context_time_nan', 'assignment_id'], axis=1, errors='ignore')
+        # print(right_order)
+        # print(pivot_df.columns)
+        pivot_df = pivot_df.drop(['reward_value_id_nan', 'context_value_id_nan', 'context_value_nan','context_time_nan', 'context_text_nan', 'assignment_id'], axis=1, errors='ignore')
         pivot_df = pivot_df.reset_index()
         pivot_df = pivot_df.rename(columns={'policy_name': 'policy', 'reward_value': 'reward'})
 
@@ -202,6 +211,12 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         cursor.close()
 
         df = df.drop(['assignment_id'], axis=1, errors='ignore')
+
+
+        columns = df.columns.tolist()
+        other_columns = [col for col in columns if col not in right_order]
+        new_columns = other_columns + right_order
+        df = df[new_columns]
         return df
     except Exception as e:
         # empty
