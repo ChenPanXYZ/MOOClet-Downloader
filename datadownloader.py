@@ -132,7 +132,7 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
 
         cursor.execute("""
             CREATE TEMPORARY VIEW %s AS
-            SELECT ar.assignment_id, ar.learner_id, ar.policy_id, ar.arm, ar.reward_value_id, ar.reward_id, ar.reward_value, ar.reward_time, ar.arm_time, ar.row_number, ar.time_to_find_contexts, c.id as context_value_id, c.value as context_value, c.variable_id as context_variable_id, c.timestamp as context_time, c.text as context_text
+            SELECT ar.assignment_id, ar.learner_id, ar.policy_id, ar.arm, ar.reward_value_id, ar.reward_id, ar.reward_value, ar.reward_time, ar.arm_time, ar.row_number, ar.time_to_find_contexts, c.id as context_value_id, c.value as context_value, c.variable_id as context_variable_id, c.timestamp as context_time, CASE WHEN c.text = 'Init Context' THEN True ELSE False END AS context_imputed
             FROM %s ar LEFT JOIN %s c ON ar.learner_id = c.learner_id and c.timestamp < ar.time_to_find_contexts;
         """, [contexts_merged_view, arm_reward_merged_max_view, context_values_view])
 
@@ -158,7 +158,7 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
 
         # Now we have everything, but we still need to map IDs with Names.
         cursor.execute("""
-            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t0.reward_value_id, t1.name as reward_name, t0.reward_value, t0.reward_time, t0.context_value_id, t2.name as context_name, t0.context_value, t0.context_time, t0.context_text from %s t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
+            SELECT t0.assignment_id, t0.learner_id, t3.name as policy_name, t0.arm, t0.arm_time, t0.reward_value_id, t1.name as reward_name, t0.reward_value, t0.reward_time, t0.context_value_id, t2.name as context_name, t0.context_value, t0.context_time, t0.context_imputed from %s t0 LEFT JOIN engine_variable t1 on (t0.reward_id = t1.id) LEFT JOIN engine_variable t2 on (t0.context_variable_id = t2.id) LEFT JOIN engine_policy t3 on (t0.policy_id = t3.id);
         """, [contexts_merged_max_view])
 
         result = cursor.fetchall()
@@ -174,10 +174,10 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
             right_order.append(f'context_value_id_{contextual_value}')
             right_order.append(f'context_value_{contextual_value}')
             right_order.append(f'context_time_{contextual_value}')
-            right_order.append(f'context_text_{contextual_value}')
+            right_order.append(f'context_imputed_{contextual_value}')
         pivot_df = df.pivot(index=['assignment_id', 'learner_id', 'policy_name', 'arm', 'arm_time', 'reward_value_id', 'reward_name', 'reward_value', 'reward_time'],
                             columns=['context_name'],
-                            values=['context_value_id', 'context_value', 'context_time', 'context_text'])
+                            values=['context_value_id', 'context_value', 'context_time', 'context_imputed'])
         
 
         # Flatten the column names
@@ -187,7 +187,7 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         # Reset the index
         # print(right_order)
         # print(pivot_df.columns)
-        pivot_df = pivot_df.drop(['reward_value_id_nan', 'context_value_id_nan', 'context_value_nan','context_time_nan', 'context_text_nan', 'assignment_id'], axis=1, errors='ignore')
+        pivot_df = pivot_df.drop(['reward_value_id_nan', 'context_value_id_nan', 'context_value_nan','context_time_nan', 'context_imputed_nan', 'assignment_id'], axis=1, errors='ignore')
         pivot_df = pivot_df.reset_index()
         pivot_df = pivot_df.rename(columns={'policy_name': 'policy', 'reward_value': 'reward'})
 
