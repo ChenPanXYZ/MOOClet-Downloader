@@ -210,7 +210,7 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         )
         cursor.close()
 
-        df = df.drop(['assignment_id'], axis=1, errors='ignore')
+        # df = df.drop(['assignment_id'], axis=1, errors='ignore')
 
 
         columns = df.columns.tolist()
