@@ -3,7 +3,7 @@ import numpy as np
 from credentials import *  
 import uuid
 from psycopg2.extensions import AsIs
-
+all_contextuals = []
 
 
 # Fix: when there is reward, use the reward time to match.
@@ -169,6 +169,8 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         
         df = pd.DataFrame(data = result, columns= [i[0] for i in cursor.description])
         contextual_values = df['context_name'].dropna().unique()
+        global all_contextuals
+        all_contextuals += contextual_values.tolist()
         right_order = []
         for contextual_value in contextual_values:
             right_order.append(f'context_value_id_{contextual_value}')
@@ -248,3 +250,23 @@ for mooclet_name in mooclet_names:
         reward_variable_name = 'dummy reward name'
     df = data_downloader_local_new(mooclet_name, reward_variable_name)
     df.to_csv(f'./datasets/{mooclet_name}.csv', index=False)
+
+
+# downloading contextual variables.
+all_contextuals = list(set(all_contextuals))
+cursor = conn.cursor()
+cursor.execute("DROP VIEW IF EXISTS contextual_variables CASCADE;")
+cursor.execute("""
+    CREATE TEMPORARY VIEW contextual_variables AS
+    SELECT * 
+    from engine_variable where name = ANY(%s);
+    """, [all_contextuals, ])
+
+cursor.execute("""
+    SELECT engine_value.id, name, value, learner_id, timestamp FROM contextual_variables JOIN engine_value ON contextual_variables.id = engine_value.variable_id;
+"""
+)
+df = pd.DataFrame(data = cursor.fetchall(), columns= [i[0] for i in cursor.description])
+df = df[['id', 'name', 'value', 'learner_id', 'timestamp']]
+df.to_csv("contextual_values.csv", index=False)
+cursor.close()
