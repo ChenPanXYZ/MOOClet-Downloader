@@ -73,21 +73,21 @@ def data_downloader_local_new(mooclet_name, reward_variable_name):
         cursor.execute("""
             CREATE TEMPORARY VIEW %s AS
             SELECT * FROM
-            engine_value WHERE variable_id = %s AND mooclet_id = %s;
+            engine_value WHERE variable_id = %s AND mooclet_id = %s order by timestamp;
             """, [reward_values_view, reward_variable_id, mooclet_id])
         
          # get all context values
         cursor.execute("""
             CREATE TEMPORARY VIEW %s AS
             SELECT * FROM
-            engine_value WHERE variable_id != %s AND mooclet_id = %s and version_id is null AND variable_id != ALL(%s);
+            engine_value WHERE variable_id != %s AND mooclet_id = %s and version_id is null AND variable_id != ALL(%s) order by timestamp;
             """, [context_values_view, reward_variable_id, mooclet_id, reserved_variable_ids])
 
         # Get all arm assignments (as a base to which we are appending reward & contextual based on some condition)
         cursor.execute("""
             CREATE TEMPORARY VIEW %s AS
             SELECT * FROM
-            engine_value WHERE variable_id = %s AND mooclet_id = %s;
+            engine_value WHERE variable_id = %s AND mooclet_id = %s order by timestamp;
             """, [arm_assignments_view, version_id, mooclet_id])
         
         # First, merge arm assignments with rewards after it.
